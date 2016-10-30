@@ -1,148 +1,122 @@
 package com.shan.idstut;
 
-import java.io.BufferedReader;
 import java.io.ByteArrayOutputStream;
-import java.io.File;
-import java.io.FileReader;
+import java.io.FileNotFoundException;
 import java.io.IOException;
 import java.net.URI;
+import java.net.URISyntaxException;
+import java.util.HashSet;
+import java.util.Set;
 
 import org.apache.hadoop.conf.Configuration;
 import org.apache.hadoop.fs.FSDataInputStream;
 import org.apache.hadoop.fs.FileSystem;
+import org.apache.hadoop.fs.FileUtil;
 import org.apache.hadoop.fs.Path;
 import org.apache.hadoop.io.IOUtils;
 import org.apache.hadoop.io.IntWritable;
 import org.apache.hadoop.io.LongWritable;
+import org.apache.hadoop.io.NullWritable;
 import org.apache.hadoop.io.Text;
-import org.apache.hadoop.mapred.jobcontrol.JobControl;
 import org.apache.hadoop.mapreduce.Job;
 import org.apache.hadoop.mapreduce.Mapper;
 import org.apache.hadoop.mapreduce.Reducer;
-import org.apache.hadoop.mapreduce.Reducer.Context;
 import org.apache.hadoop.mapreduce.lib.input.FileInputFormat;
-import org.apache.hadoop.mapreduce.lib.input.TextInputFormat;
-import org.apache.hadoop.mapreduce.lib.jobcontrol.ControlledJob;
 import org.apache.hadoop.mapreduce.lib.output.FileOutputFormat;
-import org.apache.hadoop.mapreduce.lib.output.TextOutputFormat;
 
 class PageRankPrepJobs {
 
 	int n;
-
-	public static class UniqNodeMapper extends Mapper<Object, Text, Text, IntWritable> {
-
-		public void map(Object key, Text value, Context context)
-				throws IOException, InterruptedException {
-			String edgeText = value.toString();
-			String[] nodesStrings = edgeText.split("\t");
-			for (String node : nodesStrings) {
-				context.write(new Text(node), new IntWritable(1));
-			}
-		}
-	}
-
-	public static class UniqNodeReducer extends
-			Reducer<Text, IntWritable, IntWritable, IntWritable> {
-		public void reduce(Text key, Iterable<IntWritable> values,
-				Context context) throws IOException, InterruptedException {
-			context.write(new IntWritable(1), new IntWritable(1));
-		}
-	}
+	static Configuration conf;
 
 	public static class UniqNodeCountMapper extends
-			Mapper<LongWritable, Text, Text, Text> {
+			Mapper<LongWritable, Text, IntWritable, Text> {
 		public void map(LongWritable key, Text value, Context context)
 				throws IOException, InterruptedException {
 			String[] vals = value.toString().split("\t");
-			context.write(new Text(vals[0]), new Text(vals[1]));
+			for(String val:vals)
+				context.write(new IntWritable(1), new Text(val));
 		}
 	}
 
 	public static class UniqNodeCountReducer extends
-			Reducer<Text, Text, Text, IntWritable> {
-		public void reduce(Text key, Iterable<Text> values, Context context)
+			Reducer<IntWritable, Text, NullWritable, IntWritable> {
+		public void reduce(IntWritable key, Iterable<Text> values, Context context)
 				throws IOException, InterruptedException {
-			int count = 0;
+			Set<String> uniqueNodesSet = new HashSet<String>();
 			for (Text val : values) {
-				count++;
+				uniqueNodesSet.add(val.toString());
 			}
-			context.write(new Text("count"), new IntWritable(count));
+			context.write(null, new IntWritable(uniqueNodesSet.size()));
 		}
 	}
 
-	public PageRankPrepJobs() throws IOException {
-		Configuration conf = new Configuration();
-		final JobControl control = new JobControl("page_rank_prep_jobs");
-		Job job1 = Job.getInstance(conf, "map_uniq_nodes");
-		ControlledJob cJob1 = new ControlledJob(job1, null);
-		control.addJob(cJob1);
-
-		job1.setJarByClass(PageRankPrepJobs.class);
-		job1.setMapperClass(UniqNodeMapper.class);
-		job1.setReducerClass(UniqNodeReducer.class);
-
-		job1.setInputFormatClass(TextInputFormat.class);
-		job1.setOutputFormatClass(TextOutputFormat.class);
-
-		job1.setMapOutputKeyClass(Text.class);
-		job1.setMapOutputValueClass(IntWritable.class);
-
-		job1.setOutputKeyClass(Text.class);
-		job1.setOutputValueClass(Text.class);
-
-		job1.setOutputKeyClass(Text.class);
-		job1.setOutputValueClass(IntWritable.class);
-
-		FileInputFormat.addInputPath(job1, new Path("part-0000"));
-		FileOutputFormat.setOutputPath(job1, new Path("output"));
-
-		Job job2 = Job.getInstance(conf, "count_uniq_nodes");
-		ControlledJob cJob2 = new ControlledJob(job2, null);
-		control.addJob(cJob2);
-		cJob2.addDependingJob(cJob1);
-
-		job2.setJarByClass(PageRankPrepJobs.class);
-		job2.setMapperClass(UniqNodeCountMapper.class);
-		job2.setReducerClass(UniqNodeCountReducer.class);
-
-		job2.setInputFormatClass(TextInputFormat.class);
-		job2.setOutputFormatClass(TextOutputFormat.class);
-
-		job2.setMapOutputKeyClass(Text.class);
-		job2.setMapOutputValueClass(Text.class);
-
-		FileInputFormat.addInputPath(job2, new Path("output"));
-		FileOutputFormat.setOutputPath(job2, new Path("output@"));
-
-		Thread t = new Thread() {
-			public void run() {
-				control.run();
-			}
-		};
-
-		t.start();
-		while (!control.allFinished()) {
+	public PageRankPrepJobs(String working_fs, String input_path, String output_path) throws IOException, ClassNotFoundException, InterruptedException, URISyntaxException {
+		conf = new Configuration();
+		
+		FileSystem fs;
+		try {
+			fs = FileSystem.get(new URI(working_fs), conf);
+		} catch (URISyntaxException exp) {
+			fs = FileSystem.get(conf);
+			exp.printStackTrace();
 		}
+		
+		if(fs.exists(new Path(output_path))){
+			fs.delete(new Path(output_path), true);
+		}
+		
+		Job job = Job.getInstance(conf, "count_uniq_nodes");
+
+		job.setJarByClass(PageRankPrepJobs.class);
+		job.setMapperClass(UniqNodeCountMapper.class);
+		job.setReducerClass(UniqNodeCountReducer.class);
+
+		job.setMapOutputKeyClass(IntWritable.class);
+		job.setMapOutputValueClass(Text.class);
+		
+		job.setOutputKeyClass(Text.class);
+		job.setOutputValueClass(IntWritable.class);
+		
+
+		FileInputFormat.addInputPath(job, new Path(input_path+"/part*"));
+		FileOutputFormat.setOutputPath(job, new Path(output_path+"/temp/num_nodes"));
+		
+		job.waitForCompletion(true);
 
 		System.out.println("jobs finished");
+		
+		getMergeInHdfs(fs, output_path+"/temp/num_nodes/", output_path+"/num_nodes");
 
-		// Get the filesystem - HDFS
-		FileSystem fs = FileSystem.get(URI.create("output@/part-r-00000"), conf);
+		populateNumOfNodes(fs, output_path);
+		
+		fs.close();
+	}
+	
+	private void populateNumOfNodes(FileSystem fs, String output_path) throws IllegalArgumentException, IOException {
 		FSDataInputStream in = null;
-
 		try {
-			// Open the path mentioned in HDFS
-			in = fs.open(new Path("output@/part-r-00000"));
+			in = fs.open(new Path(output_path+"/num_nodes"));
 			ByteArrayOutputStream baos = new ByteArrayOutputStream();
 			IOUtils.copyBytes(in, baos, 4096, false);
-			n = Integer.parseInt(baos.toString().split("\t")[1].replace("\n", ""));
+			n = Integer.parseInt(baos.toString().replace("\n", ""));
 			System.out.println("End Of file: HDFS file read complete");
 
 		} finally {
-			//n = Integer.parseInt(in.readLine().split("\t")[1]);
 			IOUtils.closeStream(in);
+			
 		}
+	}
+
+	public static boolean getMergeInHdfs(FileSystem fs, String src, String dest)
+			throws IllegalArgumentException, IOException {
+		Path srcPath = new Path(src);
+		Path dstPath = new Path(dest);
+
+		if (!fs.exists(srcPath))
+			throw new FileNotFoundException(src + "not present");
+
+		return FileUtil.copyMerge(fs, srcPath, fs, dstPath, true, conf, null);
 	}
 
 	public int getN() {

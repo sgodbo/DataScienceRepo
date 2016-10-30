@@ -1,120 +1,60 @@
 package com.shan.idstut;
 
-import java.io.File;
+import java.io.FileNotFoundException;
 import java.io.IOException;
+import java.net.URI;
+import java.net.URISyntaxException;
+import java.nio.ByteBuffer;
+import java.util.ArrayList;
+import java.util.Collections;
+import java.util.regex.Matcher;
 import java.util.regex.Pattern;
 
 import org.apache.hadoop.conf.Configuration;
+import org.apache.hadoop.examples.Sort;
+import org.apache.hadoop.fs.FileSystem;
+import org.apache.hadoop.fs.FileUtil;
 import org.apache.hadoop.fs.Path;
 import org.apache.hadoop.io.DoubleWritable;
-import org.apache.hadoop.io.IntWritable;
 import org.apache.hadoop.io.LongWritable;
+import org.apache.hadoop.io.NullWritable;
 import org.apache.hadoop.io.Text;
+import org.apache.hadoop.io.WritableComparator;
 import org.apache.hadoop.mapred.jobcontrol.JobControl;
-import org.apache.hadoop.mapred.lib.MultipleOutputFormat;
-import org.apache.hadoop.mapred.lib.MultipleOutputs;
 import org.apache.hadoop.mapreduce.Job;
 import org.apache.hadoop.mapreduce.Mapper;
 import org.apache.hadoop.mapreduce.Reducer;
 import org.apache.hadoop.mapreduce.lib.input.FileInputFormat;
+import org.apache.hadoop.mapreduce.lib.input.KeyValueTextInputFormat;
 import org.apache.hadoop.mapreduce.lib.input.TextInputFormat;
 import org.apache.hadoop.mapreduce.lib.jobcontrol.ControlledJob;
 import org.apache.hadoop.mapreduce.lib.output.FileOutputFormat;
+import org.apache.hadoop.mapreduce.lib.output.MapFileOutputFormat;
+import org.apache.hadoop.mapreduce.lib.output.MultipleOutputs;
 import org.apache.hadoop.mapreduce.lib.output.TextOutputFormat;
-import org.apache.zookeeper.AsyncCallback.StatCallback;
-
-import java.util.regex.Matcher;
-import com.shan.idstut.PageRankPrepJobs.UniqNodeCountMapper;
-import com.shan.idstut.PageRankPrepJobs.UniqNodeCountReducer;
-import com.shan.idstut.PageRankPrepJobs.UniqNodeMapper;
-import com.shan.idstut.PageRankPrepJobs.UniqNodeReducer;
-import com.sun.xml.bind.v2.schemagen.xmlschema.List;
+import org.apache.hadoop.mapreduce.lib.partition.InputSampler;
+import org.apache.hadoop.mapreduce.lib.partition.TotalOrderPartitioner;
 
 public class PageRank {
-	public static class PRInitializerMapper extends
-			Mapper<Object, Text, Text, Text> {
-		public void map(Object key, Text value, Context context)
-				throws IOException, InterruptedException {
-			int N = context.getConfiguration().getInt("num_of_nodes", 5000);
-			String vals = value.toString();
-			String[] nodes = vals.split("\t");
-			String targetVal = "";
-			if(nodes[0].length() + 1 < vals.length())
-				targetVal = vals.substring(nodes[0].length() + 1, vals.length());
-			
-			context.write(
-					new Text(nodes[0]),
-					new Text(targetVal
-							+ "\t"
-							+ String.valueOf((double) 1/N)));
-		}
-	}
 
-	public static class PRInitializerReducer extends
-			Reducer<Text, Text, Text, Text> {
-		public void reduce(Text key, Text value, Context context)
-				throws IOException, InterruptedException {
-			context.write(key, value);
-		}
-	}
+	static Configuration conf;
+	static String input_path;
+	static String output_path;
+	static String working_fs;
 
-	public static class LinkMapper extends
-			Mapper<Object, Text, Text, Text> {
-		public void map(Object key, Text value, Context context)
-				throws IOException, InterruptedException {
-			int N = Integer.parseInt(context.getConfiguration().get(
-					"num_of_nodes"));
-			String valString = value.toString();
-			String[] nodes = valString.split("\t");
-			int outBound = nodes.length - 2;
-			double PR = Double.parseDouble(nodes[nodes.length - 1]);
-			double temp = PR / outBound;
-			int i = 0;
-			StringBuffer sb = new StringBuffer();
-			for (String node : nodes) {
-				if (i != 0 && i != nodes.length - 1) {
-					context.write(new Text(node), new Text(String.valueOf(temp)));
-					sb.append(node);
-					sb.append("\t");
-				}
+	public static class DoubComparator extends WritableComparator {
 
-				i++;
-			}
-			
-			context.write(new Text(nodes[0]), new Text(sb.toString()));
-		}
-	}
-
-	public static class LinkReducer extends
-			Reducer<Text, Text, Text, Text> {
-		public void reduce(Text key, Iterable<Text> values,
-				Context context) throws IOException, InterruptedException {
-			double sum = 0;
-			StringBuffer sBuffer = new StringBuffer();
-			for (Text val : values) {
-				if(isDouble(val.toString()))
-						sum += Double.parseDouble(val.toString());
-				else{
-					sBuffer.append(val.toString());
-				}					
-			}
-			
-			sum = sum * context.getConfiguration().getDouble("beta", 0.85)
-					+ context.getConfiguration().getDouble("const_factor", 0);
-			
-			if(sum >= context.getConfiguration().getDouble("threshold_value", 0)){
-				sBuffer.append(String.valueOf(sum));				
-				context.write(key, new Text(sBuffer.toString()));
-			}			
+		public DoubComparator() {
+			super(DoubleWritable.class);
 		}
 
-		private boolean isDouble(String string) {
-			// TODO Auto-generated method stub
-			Pattern pattern = Pattern.compile("[0-9]+[.][0-9]+");
-			Matcher matcher = pattern.matcher(string);
-			if(matcher.find())
-				return true;
-			return false;
+		@Override
+		public int compare(byte[] b1, int s1, int l1, byte[] b2, int s2, int l2) {
+
+			Double v1 = ByteBuffer.wrap(b1, s1, l1).getDouble();
+			Double v2 = ByteBuffer.wrap(b2, s2, l2).getDouble();
+
+			return v1.compareTo(v2) * (-1);
 		}
 	}
 
@@ -124,83 +64,39 @@ public class PageRank {
 	 * @throws IllegalArgumentException
 	 * @throws InterruptedException
 	 * @throws ClassNotFoundException
+	 * @throws URISyntaxException
 	 */
 	public static void main(String[] args) throws IllegalArgumentException,
-			IOException, ClassNotFoundException, InterruptedException {
+			IOException, ClassNotFoundException, InterruptedException,
+			URISyntaxException {
 		// TODO Auto-generated method stub
-		PageRankPrepJobs p1 = new PageRankPrepJobs();
-		int N = p1.n;
-		//int N = 5;
-		System.out.println(N);
+		working_fs = args[0];
+		input_path = args[1];
+		output_path = args[2];
 		
-		Configuration conf = new Configuration();
-		conf.setInt("num_of_nodes", N);
-		conf.setDouble("beta", 0.85);
-		conf.setDouble("const_factor", (double)0.15/N);
-		conf.setDouble("threshold_value", (double) 5/N);
-		
+		long start_time = System.currentTimeMillis();
+
+		setGlobalConfigForJobs();
+
 		final JobControl control = new JobControl("page_rank_prep_jobs");
-		Job job1 = Job.getInstance(conf, "initialize_pr");
-		ControlledJob cJob1 = new ControlledJob(job1, null);
-		control.addJob(cJob1);
-		
-		job1.setJarByClass(PageRank.class);
-		job1.setMapperClass(PRInitializerMapper.class);
-		job1.setReducerClass(PRInitializerReducer.class);
 
-		job1.setInputFormatClass(TextInputFormat.class);
-		job1.setOutputFormatClass(TextOutputFormat.class);
-
-		job1.setMapOutputKeyClass(Text.class);
-		job1.setMapOutputValueClass(Text.class);
-
-		job1.setOutputKeyClass(Text.class);
-		job1.setOutputValueClass(Text.class);
-
-		FileInputFormat.addInputPath(job1, new Path("part-00001"));
-		FileOutputFormat.setOutputPath(job1, new Path("output@@"));
-		
-		
 		Job[] linkedJobs = new Job[8];
 		ControlledJob[] controlledJobs = new ControlledJob[8];
-		linkedJobs[0] = Job.getInstance(conf, "calc_pr_one_itr");
-		controlledJobs[0] = new ControlledJob(linkedJobs[0], null);
-		control.addJob(controlledJobs[0]);
-		controlledJobs[0].addDependingJob(cJob1);
 
-		linkedJobs[0].setJarByClass(PageRank.class);
-		linkedJobs[0].setMapperClass(LinkMapper.class);
-		linkedJobs[0].setReducerClass(LinkReducer.class);
-
-		linkedJobs[0].setInputFormatClass(TextInputFormat.class);
-		linkedJobs[0].setOutputFormatClass(TextOutputFormat.class);
-
-		linkedJobs[0].setMapOutputKeyClass(Text.class);
-		linkedJobs[0].setMapOutputValueClass(Text.class);
-		
-		FileInputFormat.addInputPath(linkedJobs[0], new Path("output@@"));
-		FileOutputFormat.setOutputPath(linkedJobs[0], new Path("output0"));
-		MultipleOutputs.addNamedOutput(linkedJobs[0], "text", outputFormatClass, keyClass, valueClass)
-		
-		for(int i = 1;i < 3;i++){
-			linkedJobs[i] = Job.getInstance(conf, "calc_pr_one_itr"+i);
+		for (int i = 0; i < 8; i++) {
+			linkedJobs[i] = Job.getInstance(conf, "calc_pr_one_itr" + i);
 			controlledJobs[i] = new ControlledJob(linkedJobs[i], null);
 			control.addJob(controlledJobs[i]);
-			controlledJobs[i].addDependingJob(controlledJobs[i-1]);
+			conf.setInt("iter", i);
+			if (i != 0) {
+				controlledJobs[i].addDependingJob(controlledJobs[i - 1]);
+			}
 
-			linkedJobs[i].setJarByClass(PageRank.class);
-			linkedJobs[i].setMapperClass(LinkMapper.class);
-			linkedJobs[i].setReducerClass(LinkReducer.class);
+			linkedJobs[i] = setPRJobProperties(linkedJobs[i], i);
 
-			linkedJobs[i].setInputFormatClass(TextInputFormat.class);
-			linkedJobs[i].setOutputFormatClass(TextOutputFormat.class);
+			
 
-			linkedJobs[i].setMapOutputKeyClass(Text.class);
-			linkedJobs[i].setMapOutputValueClass(Text.class);
-			FileInputFormat.addInputPath(linkedJobs[i], new Path("output"+(i-1)+"/"));
-			FileOutputFormat.setOutputPath(linkedJobs[i], new Path("output"+i+"/"));
 		}
-		
 
 		Thread t = new Thread() {
 			public void run() {
@@ -211,7 +107,141 @@ public class PageRank {
 		t.start();
 		while (!control.allFinished()) {
 		}
+		
+		try {
+			getMergeInHdfs(working_fs, output_path + "/temp/iter1/unsorted/filtered",
+					output_path + "/temp/iter1/sorted/iter1.out");
+			getMergeInHdfs(working_fs, output_path + "/temp/iter8/unsorted/filtered",
+					output_path + "/temp/iter8/sorted/iter8.out");
+		} catch (FileNotFoundException exp) {
+			exp.printStackTrace();
+		}
+		
+		runSortJob(1);
+		runSortJob(8);
+		
+		try {
+			getMergeInHdfs(working_fs, output_path + "/temp/iter1/sorted/merged",
+					output_path + "/iter1.out");
+			getMergeInHdfs(working_fs, output_path + "/temp/iter8/sorted/merged",
+					output_path + "/iter8.out");
+		} catch (FileNotFoundException exp) {
+			exp.printStackTrace();
+		}
+
+		
 		System.out.println("jobs finished");
+		
+		System.out.println("elapsed time ---------------->" + (System.currentTimeMillis()-start_time));
 		System.exit(0);
+	}
+
+	private static void runSortJob(int iterIdx)
+			throws IllegalArgumentException, IOException, ClassNotFoundException, InterruptedException {
+		// TODO Auto-generated method stub
+		Job job = Job.getInstance(conf, "sort_job");
+		job.setJarByClass(PageRankSortJobs.class);
+		
+		job.setNumReduceTasks(1);
+		FileInputFormat.addInputPath(job, new Path(output_path + "/temp/iter"
+				+ iterIdx + "/sorted/iter"+ iterIdx +".out"));
+
+		//TotalOrderPartitioner.setPartitionFile(job.getConfiguration(), new Path(output_path+"/temp/partition_file"));
+		// Write partition file with random sampler
+		
+		job.setInputFormatClass(TextInputFormat.class);
+		job.setOutputFormatClass(TextOutputFormat.class);
+
+		job.setMapOutputKeyClass(DoubleWritable.class);
+		job.setMapOutputValueClass(Text.class);
+
+		job.setOutputKeyClass(DoubleWritable.class);
+		job.setOutputValueClass(Text.class);
+		
+        //InputSampler.Sampler<DoubleWritable, NullWritable> sampler = new InputSampler.RandomSampler<DoubleWritable,NullWritable>(0.01, 1000, 10);
+        //InputSampler.writePartitionFile(job, sampler);
+
+        // Use TotalOrderPartitioner and default identity mapper and reducer 
+        //job.setPartitionerClass(TotalOrderPartitioner.class);
+        
+        
+		job.setMapperClass(PageRankSortJobs.PRSortMapper.class);
+		job.setReducerClass(PageRankSortJobs.PRSortReducer.class);
+
+		
+		
+		
+        
+		job.setSortComparatorClass(DoubComparator.class);
+
+		
+		FileOutputFormat.setOutputPath(job, new Path(output_path + "/temp/iter"
+				+ iterIdx + "/sorted/merged"));
+		
+		
+		job.waitForCompletion(true);
+	}
+
+	private static Job setPRJobProperties(Job job, int jobIdx)
+			throws IllegalArgumentException, IOException {
+		// TODO Auto-generated method stub
+		job.setJarByClass(PageRank.class);
+		job.setMapperClass(PageRankMapperReducer.PageRankMapper.class);
+		job.setReducerClass(PageRankMapperReducer.PageRankReducer.class);
+
+		job.setInputFormatClass(TextInputFormat.class);
+		job.setOutputFormatClass(TextOutputFormat.class);
+
+		job.setMapOutputKeyClass(Text.class);
+		job.setMapOutputValueClass(Text.class);
+		
+		job.setOutputKeyClass(Text.class);
+		job.setOutputValueClass(Text.class);
+
+		if (jobIdx == 0)
+			FileInputFormat.addInputPath(job, new Path(input_path + "/part*"));
+		else
+			FileInputFormat.addInputPath(job, new Path(output_path
+					+ "/temp/iter" + jobIdx + "/unsorted/part*"));
+		FileOutputFormat.setOutputPath(job, new Path(output_path + "/temp/iter"
+				+ (jobIdx + 1) + "/unsorted/"));
+		MultipleOutputs.addNamedOutput(job, "text", TextOutputFormat.class,
+				DoubleWritable.class, Text.class);
+
+		return job;
+	}
+
+	private static void setGlobalConfigForJobs() throws ClassNotFoundException,
+			IOException, InterruptedException, URISyntaxException {
+		// TODO Auto-generated method stub
+		PageRankPrepJobs p1 = new PageRankPrepJobs(working_fs, input_path,
+				output_path);
+		int N = p1.n;
+		System.out.println(N);
+		System.out.println((double) 5 / N);
+
+		conf = new Configuration();
+		conf.setInt("num_of_nodes", N);
+		conf.setDouble("beta", 0.85);
+		conf.setDouble("const_factor", (double) 0.15 / N);
+		conf.setDouble("threshold_value", (double) 5 / N);
+	}
+	
+	public static boolean getMergeInHdfs(String working_fs, String src,
+			String dest) throws IllegalArgumentException, IOException {
+		FileSystem fs;
+		try {
+			fs = FileSystem.get(new URI(working_fs), conf);
+		} catch (URISyntaxException exp) {
+			fs = FileSystem.get(conf);
+			exp.printStackTrace();
+		}
+		Path srcPath = new Path(src);
+		Path dstPath = new Path(dest);
+
+		if (!fs.exists(srcPath))
+			throw new FileNotFoundException(src + "not present");
+
+		return FileUtil.copyMerge(fs, srcPath, fs, dstPath, false, conf, null);
 	}
 }
